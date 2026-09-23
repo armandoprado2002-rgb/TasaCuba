@@ -1,0 +1,472 @@
+name: Build TasaCuba APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Instalar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Crear proyecto Android
+        run: |
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+              id("org.jetbrains.kotlin.plugin.compose")
+          }
+
+          android {
+              namespace = "com.example.tasacuba"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.example.tasacuba"
+                  minSdk = 26
+                  targetSdk = 35
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = true
+                      isShrinkResources = true
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+                      signingConfig = signingConfigs.getByName("debug")
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+              buildFeatures {
+                  compose = true
+              }
+              lint {
+                  checkReleaseBuilds = false
+                  abortOnError = false
+              }
+          }
+
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.foundation:foundation")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.3")
+              implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
+              implementation("androidx.core:core-ktx:1.15.0")
+              implementation("com.squareup.okhttp3:okhttp:4.12.0")
+          }
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+              id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx3g
+          kotlin.code.style=official
+          EOF
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "TasaCuba"
+          include(":app")
+          EOF
+          mkdir -p app
+          cat > app/proguard-rules.pro <<'EOF'
+          -dontwarn okhttp3.**
+          -dontwarn okio.**
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+              <application
+                  android:label="@string/app_name"
+                  android:icon="@drawable/ic_legacy"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:theme="@style/Theme.TasaCuba">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:launchMode="singleTop">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/java/com/example/tasacuba
+          cat > app/src/main/java/com/example/tasacuba/MainActivity.kt <<'EOF'
+          package com.example.tasacuba
+
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.activity.enableEdgeToEdge
+          import androidx.activity.viewModels
+
+          class MainActivity : ComponentActivity() {
+
+              private val vm: RatesVM by viewModels()
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  enableEdgeToEdge()
+                  setContent {
+                      TasaTheme {
+                          App(vm)
+                      }
+                  }
+              }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/example/tasacuba
+          cat > app/src/main/java/com/example/tasacuba/RatesVM.kt <<'EOF'
+          package com.example.tasacuba
+
+          import android.app.Application
+          import android.content.Context
+          import android.net.ConnectivityManager
+          import android.net.Network
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.setValue
+          import androidx.lifecycle.AndroidViewModel
+          import androidx.lifecycle.viewModelScope
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.launch
+          import kotlinx.coroutines.withContext
+          import okhttp3.MediaType.Companion.toMediaType
+          import okhttp3.OkHttpClient
+          import okhttp3.Request
+          import okhttp3.RequestBody.Companion.toRequestBody
+          import org.json.JSONObject
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+          import java.util.concurrent.TimeUnit
+
+          data class Rates(val usd: Double?, val eur: Double?, val mlc: Double?, val updatedAt: Long)
+
+          class RatesVM(app: Application) : AndroidViewModel(app) {
+
+              private val ctx: Context = app.applicationContext
+              private val prefs = ctx.getSharedPreferences("tasa_cuba", Context.MODE_PRIVATE)
+              private val client = OkHttpClient.Builder()
+                  .connectTimeout(12, TimeUnit.SECONDS)
+                  .readTimeout(12, TimeUnit.SECONDS)
+                  .build()
+
+              var token by mutableStateOf(prefs.getString("token", "") ?: "")
+                  private set
+              var rates by mutableStateOf<Rates?>(loadCached())
+                  private set
+              var loading by mutableStateOf(false)
+                  private set
+              var error by mutableStateOf<String?>(null)
+                  private set
+              var online by mutableStateOf(false)
+                  private set
+
+              private val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+              private var lastAuto = 0L
+
+              private val netCallback = object : ConnectivityManager.NetworkCallback() {
+                  override fun onAvailable(network: Network) {
+                      online = true
+                      val now = System.currentTimeMillis()
+                      // evita ráfagas de reintentos si la señal parpadea
+                      if (now - lastAuto > 20_000) {
+                          lastAuto = now
+                          refresh()
+                      }
+                  }
+
+                  override fun onLost(network: Network) {
+                      online = cm.activeNetwork != null
+                  }
+              }
+
+              init {
+                  online = cm.activeNetwork != null
+                  cm.registerDefaultNetworkCallback(netCallback)
+                  if (token.isNotBlank() && (rates == null || isStale())) refresh()
+              }
+
+              private fun isStale(): Boolean {
+                  val r = rates ?: return true
+                  return System.currentTimeMillis() - r.updatedAt > 6 * 60 * 60 * 1000L
+              }
+
+              fun setToken(t: String) {
+                  token = t.trim()
+                  prefs.edit().putString("token", token).apply()
+                  error = null
+                  if (token.isNotBlank()) refresh()
+              }
+
+              private fun loadCached(): Rates? {
+                  val t = prefs.getLong("updated_at", -1L)
+                  if (t < 0) return null
+                  val usd = prefs.getFloat("usd", -1f).let { if (it < 0) null else it.toDouble() }
+                  val eur = prefs.getFloat("eur", -1f).let { if (it < 0) null else it.toDouble() }
+                  val mlc = prefs.getFloat("mlc", -1f).let { if (it < 0) null else it.toDouble() }
+                  return Rates(usd, eur, mlc, t)
+              }
+
+              private fun saveCached(r: Rates) {
+                  prefs.edit()
+                      .putLong("updated_at", r.updatedAt)
+                      .putFloat("usd", (r.usd ?: -1.0).toFloat())
+                      .putFloat("eur", (r.eur ?: -1.0).toFloat())
+                      .putFloat("mlc", (r.mlc ?: -1.0).toFloat())
+                      .apply()
+              }
+
+              fun refresh() {
+                  if (token.isBlank()) {
+                      error = "Falta el token de elToque"
+                      return
+                  }
+                  if (loading) return
+                  viewModelScope.launch {
+                      loading = true
+                      error = null
+                      val result = withContext(Dispatchers.IO) { fetch() }
+                      result.onSuccess {
+                          rates = it
+                          saveCached(it)
+                      }.onFailure {
+                          error = it.message ?: "No se pudo conectar"
+                      }
+                      loading = false
+                  }
+              }
+
+              private fun fetch(): Result<Rates> {
+                  return try {
+                      val day = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+                      val body = JSONObject().apply {
+                          put("date_from", day)
+                          put("date_to", day)
+                      }.toString().toRequestBody("application/json".toMediaType())
+
+                      val req = Request.Builder()
+                          .url("https://tasas.eltoque.com/v1/trmi")
+                          .addHeader("Authorization", "Bearer $token")
+                          .post(body)
+                          .build()
+
+                      client.newCall(req).execute().use { resp ->
+                          if (!resp.isSuccessful) {
+                              val msg = when (resp.code) {
+                                  401, 403 -> "El token no es válido"
+                                  else -> "El servidor respondió con error ${resp.code}"
+                              }
+                              return Result.failure(Exception(msg))
+                          }
+                          val text = resp.body?.string().orEmpty()
+                          val root = JSONObject(text)
+                          // La respuesta trae una fecha como clave, con un mapa de monedas dentro.
+                          val day2 = if (root.length() > 0) root.keys().next() else null
+                          val map = when {
+                              day2 != null && root.optJSONObject(day2) != null -> root.getJSONObject(day2)
+                              root.optJSONObject("tasas") != null -> root.getJSONObject("tasas")
+                              else -> root
+                          }
+                          fun pick(vararg keys: String): Double? {
+                              for (k in keys) {
+                                  if (map.has(k) && !map.isNull(k)) return map.optDouble(k).takeIf { !it.isNaN() }
+                              }
+                              return null
+                          }
+                          val usd = pick("USD")
+                          val eur = pick("EUR", "ECU")
+                          val mlc = pick("MLC")
+                          if (usd == null && eur == null && mlc == null) {
+                              return Result.failure(Exception("No reconocí los datos que envió el servidor"))
+                          }
+                          Result.success(Rates(usd, eur, mlc, System.currentTimeMillis()))
+                      }
+                  } catch (e: Exception) {
+                      Result.failure(Exception("Sin conexión o el servidor no respondió"))
+                  }
+              }
+
+              override fun onCleared() {
+                  cm.unregisterNetworkCallback(netCallback)
+                  super.onCleared()
+              }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/example/tasacuba
+          cat > app/src/main/java/com/example/tasacuba/Ui.kt <<'EOF'
+          package com.example.tasacuba
+
+          import android.os.Build
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.isSystemInDarkTheme
+          import androidx.compose.foundation.layout.Arrangement
+          import androidx.compose.foundation.layout.Box
+          import androidx.compose.foundation.layout.Column
+          import androidx.compose.foundation.layout.PaddingValues
+          import androidx.compose.foundation.layout.Row
+          import androidx.compose.foundation.layout.Spacer
+          import androidx.compose.foundation.layout.fillMaxSize
+          import androidx.compose.foundation.layout.fillMaxWidth
+          import androidx.compose.foundation.layout.height
+          import androidx.compose.foundation.layout.navigationBarsPadding
+          import androidx.compose.foundation.layout.padding
+          import androidx.compose.foundation.layout.size
+          import androidx.compose.foundation.layout.statusBarsPadding
+          import androidx.compose.foundation.layout.width
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.CircularProgressIndicator
+          import androidx.compose.material3.MaterialTheme
+          import androidx.compose.material3.OutlinedTextField
+          import androidx.compose.material3.Text
+          import androidx.compose.material3.darkColorScheme
+          import androidx.compose.material3.dynamicDarkColorScheme
+          import androidx.compose.material3.dynamicLightColorScheme
+          import androidx.compose.material3.lightColorScheme
+          import androidx.compose.runtime.Composable
+          import androidx.compose.runtime.getValue
+          import androidx.compose.runtime.mutableStateOf
+          import androidx.compose.runtime.remember
+          import androidx.compose.runtime.setValue
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.clip
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          @Composable
+          fun TasaTheme(content: @Composable () -> Unit) {
+              val dark = isSystemInDarkTheme()
+              val ctx = LocalContext.current
+              val base = when {
+                  Build.VERSION.SDK_INT >= 31 -> if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
+                  dark -> darkColorScheme(primary = Color(0xFF7FD1AE))
+                  else -> lightColorScheme(primary = Color(0xFF0F6E56))
+              }
+              val cs = if (dark) base.copy(background = Color.Black, surface = Color.Black) else base
+              MaterialTheme(colorScheme = cs, content = content)
+          }
+
+          enum class Moneda(val label: String) { USD("Dólar"), EUR("Euro"), MLC("MLC") }
+
+          @Composable
+          fun App(vm: RatesVM) {
+              val cs = MaterialTheme.colorScheme
+              Box(Modifier.fillMaxSize().background(cs.background)) {
+                  Column(
+                      Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()
+                          .padding(horizontal = 26.dp)
+                  ) {
+                      Spacer(Modifier.height(18.dp))
+                      Text("Tasa Cuba", fontSize = 32.sp, fontWeight = FontWeight.Light, color = cs.onSurface)
+                      Text(
+                          "Mercado informal, según elToque", fontSize = 13.sp, color = cs.onSurfaceVariant
+                      )
+                      Spacer(Modifier.height(20.dp))
+
+                      if (vm.token.isBlank()) {
+                          TokenSetup(vm)
+                      } else {
+                          StatusBar(vm)
+                          Spacer(Modifier.height(18.dp))
+                          Converter(vm)
+                          Spacer(Modifier.height(20.dp))
+                          RateList(vm)
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun TokenSetup(vm: RatesVM) {
+              val cs = MaterialTheme.colorScheme
+              var value by remember { mutableStateOf("") }
+              Column {
+                  Text(
+                      "Para leer la tasa necesito una clave gratuita de elToque. Regístrate en eltoque.com/apiToque y pega aquí el token que te den.",
+                      fontSize = 15.sp, color = cs.onSurfaceVariant
+                  )
+                  Spacer(Modifier.height(16.dp))
+                  OutlinedTextField(
+                      value = value,
+                      onValueChange = { value = it },
+                      label = { Text("Token de elToque") },
+                      singleLine = true,
+                      modifier = Modifier.fillMaxWidth()
+                  )
+                  Spacer(Modifier.height(14.dp))
+                  Pill("Guardar y buscar la tasa", true) { if (value.isNotBlank()) vm.setToken(value) }
+              }
+          }
+
+          @Composable
+          fun StatusBar(vm: RatesVM) {
+              val cs = MaterialTheme.colorScheme
+              Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                  Box(Modifier.size(9.dp).clip(CircleShape).background(if (vm.online) cs.primary else cs.error))
+                  Spacer(Modifier.width(8.dp))
+                  Column(Modifier.weight(1f)) {
+                      Text(
+                          if (vm.online) "En línea" else "Sin conexión, usando la última tasa guardada",
+                          fontSize = 13.sp, color = cs.onSu
